@@ -271,7 +271,9 @@
   (s/every uuid? :kind vector?))
 
 (s/def ::shape-attrs
-  (s/keys :opt-un [:internal.shape/blocked
+  (s/keys :req-un [:internal.shape/selrect
+                   :internal.shape/points]
+          :opt-un [:internal.shape/blocked
                    :internal.shape/collapsed
                    :internal.shape/content
                    :internal.shape/fill-color
@@ -307,8 +309,6 @@
                    :internal.shape/width
                    :internal.shape/height
                    :internal.shape/interactions
-                   :internal.shape/selrect
-                   :internal.shape/points
                    :internal.shape/masked-group?
                    :internal.shape/shadow
                    :internal.shape/blur]))
@@ -762,7 +762,7 @@
 
 (defn rotation-modifiers
   [center shape angle]
-  (let [displacement (let [shape-center (geom/center shape)]
+  (let [displacement (let [shape-center (geom/center-shape shape)]
                        (-> (gmt/matrix)
                            (gmt/rotate angle center)
                            (gmt/rotate (- angle) shape-center)))]
@@ -781,7 +781,7 @@
                                (distinct))
                               shapes)))
           (update-group [group objects]
-            (let [gcenter (geom/center group)
+            (let [gcenter (geom/center-shape group)
                   gxfm    (comp
                            (map #(get objects %))
                            (map #(-> %
