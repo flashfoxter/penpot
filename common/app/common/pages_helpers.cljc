@@ -59,6 +59,25 @@
                (get-in libraries [file-id :data]))]
     (get-in file [:components component-id])))
 
+;; (defn resolve-shape-ref
+;;   [shape component local-library libraries]
+;;   (let [deep-component
+;;         (if (nil? (:component-id shape))
+;;           component
+;;           (get-component (:component-id shape)
+;;                          (:component-file shape)
+;;                          local-library
+;;                          libraries))]
+;;     (get-shape deep-component (:shape-ref shape))))
+
+(defn resolve-shape-ref-direct
+  [shape component]
+  (if-let [master-shape (get-shape component (:shape-ref shape))]
+    master-shape
+    (d/seek #(= (:shape-ref %)
+                (:shape-ref shape))
+            (vals (:objects component)))))
+
 (defn get-component-root
   [component]
   (get-in component [:objects (:id component)]))
@@ -214,13 +233,13 @@
 
                new-object (update-new-object new-object object)
 
-               new-objects (concat [new-object] new-children)
+               new-objects (d/concat [new-object] new-children)
 
                updated-object (update-original-object object new-object)
 
                updated-objects (if (identical? object updated-object)
                                  updated-children
-                                 (concat [updated-object] updated-children))]
+                                 (d/concat [updated-object] updated-children))]
 
            [new-object new-objects updated-objects])
 
@@ -232,9 +251,9 @@
 
            (recur
              (next child-ids)
-             (concat new-direct-children [new-child])
-             (concat new-children new-child-objects)
-             (concat updated-children updated-child-objects))))))))
+             (d/concat new-direct-children [new-child])
+             (d/concat new-children new-child-objects)
+             (d/concat updated-children updated-child-objects))))))))
 
 
 (defn indexed-shapes

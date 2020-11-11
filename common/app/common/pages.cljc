@@ -459,9 +459,9 @@
 (s/def :internal.changes.add-obj/obj ::shape)
 
 (defmethod change-spec :add-obj [_]
-  (s/keys :req-un [::id ::page-id ::frame-id
+  (s/keys :req-un [::id (or ::page-id ::component-id)
                    :internal.changes.add-obj/obj]
-          :opt-un [::parent-id]))
+          :opt-un [::parent-id ::frame-id]))
 
 (s/def ::operation (s/multi-spec operation-spec :type))
 (s/def ::operations (s/coll-of ::operation))
@@ -707,26 +707,26 @@
                           (assoc data :options (d/dissoc-in (:options data) path)))))))
 
 (defmethod process-change :add-obj
-  [data {:keys [id obj page-id frame-id parent-id index] :as change}]
-  (d/update-in-when data [:pages-index page-id]
-                    (fn [data]
-                      (let [parent-id (or parent-id frame-id)
-                            objects (:objects data)]
-                        (when (and (contains? objects parent-id)
-                                   (contains? objects frame-id))
-                          (let [obj (assoc obj
-                                           :frame-id frame-id
-                                           :parent-id parent-id
-                                           :id id)]
-                            (-> data
-                                (update :objects assoc id obj)
-                                (update-in [:objects parent-id :shapes]
-                                           (fn [shapes]
-                                             (let [shapes (or shapes [])]
-                                               (cond
-                                                 (some #{id} shapes) shapes
-                                                 (nil? index) (conj shapes id)
-                                                 :else (cph/insert-at-index shapes index [id]))))))))))))
+  [data {:keys [id obj page-id component-id frame-id parent-id index] :as change}]
+  (let [update-fn (fn [data]
+                    (let [parent-id (or parent-id frame-id)
+                          objects (:objects data)]
+                      (let [obj (assoc obj
+                                       :frame-id frame-id
+                                       :parent-id parent-id
+                                       :id id)]
+                        (-> data
+                            (update :objects assoc id obj)
+                            (update-in [:objects parent-id :shapes]
+                                       (fn [shapes]
+                                         (let [shapes (or shapes [])]
+                                           (cond
+                                             (some #{id} shapes) shapes
+                                             (nil? index) (conj shapes id)
+                                             :else (cph/insert-at-index shapes index [id])))))))))]
+    (if page-id
+      (d/update-in-when data [:pages-index page-id] update-fn)
+      (d/update-in-when data [:components component-id] update-fn))))
 
 (defmethod process-change :mod-obj
   [data {:keys [id page-id component-id operations] :as change}]

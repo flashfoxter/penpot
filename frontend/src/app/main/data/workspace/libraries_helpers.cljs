@@ -18,6 +18,7 @@
    [app.util.logging :as log]
    [app.util.text :as ut]))
 
+;; Change this to :info :debug or :trace to debug this module
 (log/set-level! :warn)
 
 (defonce empty-changes [[] []])
@@ -38,13 +39,14 @@
 (declare get-assets)
 (declare generate-sync-shape-and-children-components)
 (declare generate-sync-shape-and-children-normal)
-(declare generate-sync-shape-and-children-nested)
 (declare generate-sync-shape-inverse)
 (declare generate-sync-shape-inverse-normal)
 (declare generate-sync-shape-inverse-nested)
-(declare generate-sync-shape<-component)
 (declare generate-sync-shape->component)
+(declare compare-children)
 (declare remove-component-and-ref)
+(declare add-shape-to-component)
+(declare remove-shape)
 (declare remove-ref)
 (declare reset-touched)
 (declare update-attrs)
@@ -356,118 +358,133 @@
   [page-id component-id shape-id local-file libraries reset?]
   (log/debug :msg "Sync shape and children" :shape (str shape-id) :reset? reset?)
   (let [container      (cph/get-container page-id component-id local-file)
-        shape          (cph/get-shape container shape-id)
-        component      (cph/get-component (:component-id shape)
-                                          (:component-file shape)
+        shape-inst     (cph/get-shape container shape-id)
+        component      (cph/get-component (:component-id shape-inst)
+                                          (:component-file shape-inst)
                                           local-file
                                           libraries)
-        root-shape     shape
+        shape-master   (cph/get-shape component (:shape-ref shape-inst))
+
+        root-shape     shape-inst
         root-component (cph/get-component-root component)]
 
     (generate-sync-shape-and-children-normal page-id
                                              component-id
                                              container
-                                             shape
+                                             shape-inst
                                              component
+                                             shape-master
                                              root-shape
                                              root-component
-                                             reset?)))
+                                             {:omit-touched? (not reset?)
+                                              :reset-touched? reset?
+                                              :set-touched? false})))
+
+(defn cons-changes
+  [[rchanges uchanges] [rchange uchange]]
+  [(cons rchanges rchange)
+   (cons uchanges uchange)])
+
+(defn concat-changes
+  [[rchanges1 uchanges1] [rchanges2 uchanges2]]
+  [(d/concat rchanges1 rchanges2)
+   (d/concat uchanges1 uchanges2)])
 
 (defn- generate-sync-shape-and-children-normal
-  [page-id component-id container shape component root-shape root-component reset?]
+  [page-id component-id container shape-inst component shape-master root-shape root-component options]
   (log/trace :msg "Sync shape (normal)"
-             :shape (str (:name shape))
+             :shape (str (:name shape-inst))
              :component (:name component))
-  (let [[rchanges uchanges]
-        (generate-sync-shape<-component shape
-                                        root-shape
-                                        root-component
-                                        component
-                                        page-id
-                                        component-id
-                                        reset?)
 
-        children-ids (get shape :shapes [])]
-
-    (loop [children-ids (seq children-ids)
-           rchanges rchanges
-           uchanges uchanges]
-      (let [child-id (first children-ids)]
-        (if (nil? child-id)
-          [rchanges uchanges]
-          (let [child-shape (cph/get-shape container child-id)
-
-                [child-rchanges child-uchanges]
-                (if (nil? (:component-id child-shape))
-                  (generate-sync-shape-and-children-normal page-id
-                                                           component-id
-                                                           container
-                                                           child-shape
-                                                           component
-                                                           root-shape
-                                                           root-component
-                                                           reset?)
-                  (generate-sync-shape-and-children-nested page-id
-                                                           component-id
-                                                           container
-                                                           child-shape
-                                                           component
-                                                           root-shape
-                                                           root-component
-                                                           reset?))]
-            (recur (next children-ids)
-                   (d/concat rchanges child-rchanges)
-                   (d/concat uchanges child-uchanges))))))))
-
-(defn- generate-sync-shape-and-children-nested
-  [page-id component-id container shape component root-shape root-component reset?]
-  (log/trace :msg "Sync shape (nested)"
-             :shape (str (:name shape))
-             :component (:name component))
-  (let [component-shape (d/seek #(= (:shape-ref %)
-                                    (:shape-ref shape))
-                                (vals (:objects component)))
-        root-shape (if (:component-id shape)
-                     shape
+  (let [root-shape (if (:component-id shape-inst)
+                     shape-inst
                      root-shape)
-        root-component (if (:component-id shape)
-                         component-shape
+        root-component (if (:component-id shape-inst)
+                         shape-master
                          root-component)
 
         [rchanges uchanges]
-        (update-attrs shape
-                      component-shape
+        (update-attrs shape-inst
+                      shape-master
                       root-shape
                       root-component
                       page-id
                       component-id
-                      {:omit-touched? false
-                       :reset-touched? false
-                       :set-touched? false
-                       :copy-touched? true})
+                      options)
 
-        children-ids (get shape :shapes [])]
+        childrenShape     (map #(cph/get-shape container %)
+                               (:shapes shape-inst))
+        childrenComponent (map #(cph/get-shape component %)
+                               (:shapes shape-master))
 
-    (loop [children-ids (seq children-ids)
-           rchanges rchanges
-           uchanges uchanges]
-      (let [child-id (first children-ids)]
-        (if (nil? child-id)
-          [rchanges uchanges]
-          (let [child-shape (cph/get-shape container child-id)
+        only-inst (fn [shape-inst]
+                    empty-changes)
 
-                [child-rchanges child-uchanges]
-                (generate-sync-shape-and-children-nested page-id
-                                                         component-id
-                                                         container
-                                                         child-shape
-                                                         component
-                                                         root-shape
-                                                         root-component
-                                                         reset?)]
-            (recur (next children-ids)
-                   (d/concat rchanges child-rchanges)
-                   (d/concat uchanges child-uchanges))))))))
+        only-master (fn [shape-master]
+                      empty-changes)
+
+        both (fn [shape-inst shape-master]
+               (let [options (if-not (:component-id shape-inst)
+                               options
+                               {:omit-touched? false
+                                :reset-touched? false
+                                :set-touched? false
+                                :copy-touched? true})]
+
+                 (generate-sync-shape-and-children-normal page-id
+                                                          component-id
+                                                          container
+                                                          shape-inst
+                                                          component
+                                                          shape-master
+                                                          root-shape
+                                                          root-component
+                                                          options)))
+
+        moved (fn [shape-inst shape-master pos-inst pos-master]
+                empty-changes)
+
+        [child-rchanges child-uchanges]
+        (compare-children childrenShape
+                          childrenComponent
+                          component
+                          only-inst
+                          only-master
+                          both
+                          moved)]
+
+    [(d/concat rchanges child-rchanges)
+     (d/concat uchanges child-uchanges)]))
+
+(defn- compare-children
+  [children-inst children-master component only-inst only-master both moved]
+  (loop [children-inst (seq (or children-inst []))
+         children-master (seq (or children-master []))
+         [rchanges uchanges] [[] []]]
+    (let [child-inst (first children-inst)
+          child-master (first children-master)]
+      (cond
+        (and (nil? child-inst) (nil? child-master))
+        [rchanges uchanges]
+
+        (nil? child-inst)
+        (concat-changes [rchanges uchanges]
+                        (map only-master children-master))
+
+        (nil? child-master)
+        (concat-changes [rchanges uchanges]
+                        (map only-inst children-inst))
+
+        :else
+        (let [ref-master (cph/resolve-shape-ref-direct child-inst component)]
+
+          (if (= (:id ref-master) (:id child-master))
+            (recur (next children-inst)
+                   (next children-master)
+                   (concat-changes [rchanges uchanges]
+                                   (both child-inst child-master)))
+
+            empty-changes))))))
 
 (defn- generate-sync-shape-inverse
   "Generate changes to update the component a shape is linked to, from
@@ -501,10 +518,10 @@
              :component (:name component))
   (let [[rchanges uchanges]
         (generate-sync-shape->component shape
+                                        component
                                         root-shape
                                         root-component
-                                        component
-                                        (:id page))
+                                        page)
 
         children-ids (get shape :shapes [])]
 
@@ -579,35 +596,18 @@
                    (d/concat rchanges child-rchanges)
                    (d/concat uchanges child-uchanges))))))))
 
-(defn- generate-sync-shape<-component
-  "Generate changes to synchronize one shape that is linked to other shape
-  inside a component. Same considerations as above about reset-touched?"
-  [shape root-shape root-component component page-id component-id reset?]
-  (if (nil? component)
-    (remove-component-and-ref shape page-id component-id)
-    (let [component-shape (get (:objects component) (:shape-ref shape))]
-      (if (nil? component-shape)
-        (remove-ref shape page-id component-id)
-        (update-attrs shape
-                      component-shape
-                      root-shape
-                      root-component
-                      page-id
-                      component-id
-                      {:omit-touched? (not reset?)
-                       :reset-touched? reset?
-                       :set-touched? false})))))
-
 (defn- generate-sync-shape->component
   "Generate changes to synchronize one shape inside a component, with other
   shape that is linked to it."
-  [shape root-shape root-component component page-id]
+  [shape component root-shape root-component page]
   (if (nil? component)
     empty-changes
     (let [component-shape (get (:objects component) (:shape-ref shape))]
-      (if (nil? component-shape)
-        empty-changes
-        (let [[rchanges1 uchanges1]
+      (let [[rchanges1 uchanges1]
+            (if (nil? component-shape)
+              (add-shape-to-component shape
+                                      component
+                                      page)
               (update-attrs component-shape
                             shape
                             root-component
@@ -616,16 +616,100 @@
                             (:id root-component)
                             {:omit-touched? false
                              :reset-touched? false
-                             :set-touched? true})
-              [rchanges2 uchanges2]
-              (reset-touched shape
-                             page-id
-                             nil)]
-          [(d/concat rchanges1 rchanges2)
-           (d/concat uchanges2 uchanges2)])))))
+                             :set-touched? true}))
+            [rchanges2 uchanges2]
+            (reset-touched shape
+                           (:id page)
+                           nil)]
+        [(d/concat rchanges1 rchanges2)
+         (d/concat uchanges2 uchanges2)]))))
 
 
 ; ---- Operation generation helpers ----
+
+(defn- add-shape-to-component
+  [shape component page]
+  (let [parent-shape           (cph/get-shape page (:parent-id shape))
+        component-parent-shape (cph/get-shape component (:shape-ref parent-shape))
+
+        update-new-shape (fn [new-shape original-shape]
+                           new-shape)
+
+        update-original-shape (fn [original-shape new-shape]
+                                (assoc original-shape
+                                       :shape-ref (:id new-shape)))
+
+        [new-shape new-shapes updated-shapes]
+        (cph/clone-object shape
+                          (:shape-ref parent-shape)
+                          (get page :objects)
+                          update-new-shape
+                          update-original-shape)
+
+        rchanges (d/concat
+                   (vec (map (fn [shape']
+                          {:type :add-obj
+                           :id (:id shape')
+                           :component-id (:id component)
+                           :parent-id (:parent-id shape')
+                           :obj shape'})
+                        new-shapes))
+                   (vec (map (fn [shape']
+                          {:type :mod-obj
+                           :page-id (:id page)
+                           :id (:id shape')
+                           :operations [{:type :set
+                                         :attr :component-id
+                                         :val (:component-id shape')}
+                                        {:type :set
+                                         :attr :component-file
+                                         :val (:component-file shape')}
+                                        {:type :set
+                                         :attr :component-root?
+                                         :val (:component-root? shape')}
+                                        {:type :set
+                                         :attr :shape-ref
+                                         :val (:shape-ref shape')}
+                                        {:type :set
+                                         :attr :touched
+                                         :val (:touched shape')}]})
+                             updated-shapes)))
+
+        uchanges (map (fn [shape']
+                        {:type :del-obj
+                         :id (:id shape')
+                         :page-id (:id page)})
+                      new-shapes)]
+
+    [rchanges uchanges]))
+
+(defn- remove-shape
+  [shape container page-id]
+  (let [objects    (get container :objects)
+        parents    (cph/get-parents (:id shape) objects)
+        children   (cph/get-children (:id shape) objects)
+        add-change (fn [id]
+                     (let [shape' (get objects id)]
+                       {:type :add-obj
+                        :id id
+                        :page-id page-id
+                        :index (cph/position-on-parent id objects)
+                        :frame-id (:frame-id shape')
+                        :parent-id (:parent-id shape')
+                        :obj shape'}))
+
+        rchanges [{:type :del-obj
+                   :page-id page-id
+                   :id (:id shape)}]
+
+        uchanges (d/concat
+                   [(add-change (:id shape))]
+                   (map add-change children)
+                   [{:type :reg-objects
+                     :page-id page-id
+                     :shapes (vec parents)}])]
+
+    [rchanges uchanges]))
 
 (defn- remove-component-and-ref
   [shape page-id component-id]
@@ -666,7 +750,7 @@
                                   {:type :set-touched
                                    :touched (:touched shape)}]})]])
 
-(defn- -remove-ref
+(defn- remove-ref
   [shape page-id component-id]
   [[(d/without-nils {:type :mod-obj
                      :id (:id shape)
