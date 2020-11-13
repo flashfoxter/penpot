@@ -19,7 +19,7 @@
    [app.util.text :as ut]))
 
 ;; Change this to :info :debug or :trace to debug this module
-(log/set-level! :warn)
+(log/set-level! :info)
 
 (defonce empty-changes [[] []])
 
@@ -45,8 +45,10 @@
 (declare generate-sync-shape->component)
 (declare compare-children)
 (declare remove-component-and-ref)
+(declare add-shape-to-instance)
 (declare add-shape-to-component)
 (declare remove-shape)
+(declare move-shape)
 (declare remove-ref)
 (declare reset-touched)
 (declare update-attrs)
@@ -412,18 +414,25 @@
                       component-id
                       options)
 
-        childrenShape     (map #(cph/get-shape container %)
+        children-shape     (map #(cph/get-shape container %)
                                (:shapes shape-inst))
-        childrenComponent (map #(cph/get-shape component %)
+        children-component (map #(cph/get-shape component %)
                                (:shapes shape-master))
 
         only-inst (fn [shape-inst]
-                    empty-changes)
+                    (js/console.log "only-inst" (clj->js shape-inst))
+                    (remove-shape shape-inst
+                                  container
+                                  page-id))
 
         only-master (fn [shape-master]
-                      empty-changes)
+                      (js/console.log "only-master" (clj->js shape-master))
+                      (add-shape-to-instance shape-master
+                                             component
+                                             container))
 
         both (fn [shape-inst shape-master]
+               (js/console.log "both" (clj->js shape-inst) (clj->js shape-master))
                (let [options (if-not (:component-id shape-inst)
                                options
                                {:omit-touched? false
@@ -441,13 +450,16 @@
                                                           root-component
                                                           options)))
 
-        moved (fn [shape-inst shape-master pos-inst pos-master]
-                empty-changes)
+        moved (fn [shape-inst shape-master]
+                (move-shape
+                  shape-inst
+                  (d/index-of children-shape shape-inst)
+                  (d/index-of children-component shape-master)
+                  container))
 
         [child-rchanges child-uchanges]
-        (compare-children childrenShape
-                          childrenComponent
-                          component
+        (compare-children children-shape
+                          children-component
                           only-inst
                           only-master
                           both
@@ -457,7 +469,7 @@
      (d/concat uchanges child-uchanges)]))
 
 (defn- compare-children
-  [children-inst children-master component only-inst only-master both moved]
+  [children-inst children-master only-inst only-master both moved]
   (loop [children-inst (seq (or children-inst []))
          children-master (seq (or children-master []))
          [rchanges uchanges] [[] []]]
@@ -468,23 +480,45 @@
         [rchanges uchanges]
 
         (nil? child-inst)
-        (concat-changes [rchanges uchanges]
-                        (map only-master children-master))
+        (reduce (fn [changes child]
+                  (concat-changes changes (only-master child)))
+                [rchanges uchanges]
+                children-master)
 
         (nil? child-master)
         (concat-changes [rchanges uchanges]
                         (map only-inst children-inst))
 
         :else
-        (let [ref-master (cph/resolve-shape-ref-direct child-inst component)]
+        (if (cph/is-master-of child-master child-inst)
+          (recur (next children-inst)
+                 (next children-master)
+                 (concat-changes [rchanges uchanges]
+                                 (both child-inst child-master)))
 
-          (if (= (:id ref-master) (:id child-master))
-            (recur (next children-inst)
-                   (next children-master)
-                   (concat-changes [rchanges uchanges]
-                                   (both child-inst child-master)))
+          (let [child-inst'   (d/seek #(cph/is-master-of child-master %)
+                                      children-inst)
+                child-master' (d/seek #(cph/is-master-of % child-inst)
+                                      children-master)]
+            (cond
+              (nil? child-inst')
+              (recur children-inst
+                     (next children-master)
+                     (concat-changes [rchanges uchanges]
+                                     (only-master child-master)))
 
-            empty-changes))))))
+              (nil? child-master')
+              (recur (next children-inst)
+                     children-master
+                     (concat-changes [rchanges uchanges]
+                                     (only-inst child-inst)))
+
+              :else
+              (recur (remove #(= (:id %) (:id child-inst')) children-inst)
+                     (next children-master)
+                     (-> [rchanges uchanges]
+                         (concat-changes (both child-inst' child-master))
+                         (concat-changes (moved child-inst' child-master)))))))))))
 
 (defn- generate-sync-shape-inverse
   "Generate changes to update the component a shape is linked to, from
@@ -627,10 +661,55 @@
 
 ; ---- Operation generation helpers ----
 
+(defn- add-shape-to-instance
+  [component-shape component page]
+  (log/info :msg (str "ADD [W] "
+                      (:name component-shape)))
+  (let [component-parent-shape (cph/get-shape component (:parent-id component-shape))
+        parent-shape           (d/seek #(cph/is-master-of component-parent-shape %)
+                                       (vals (:objects page)))
+
+        update-new-shape (fn [new-shape original-shape]
+                           (assoc new-shape
+                                  :shape-ref (:id original-shape)
+                                  :frame-id (:frame-id parent-shape)
+                                  ;; :component-id (:component-id original-shape)
+                                  ;; :component-file (:component-file original-shape)
+                                  ;; :component-root? (:component-root? original-shape)
+                                  ;; :touched (:touched original-shape)))
+                                  ))
+
+        update-original-shape (fn [original-shape new-shape]
+                                original-shape)
+
+        [new-shape new-shapes _]
+        (cph/clone-object component-shape
+                          (:id parent-shape)
+                          (get page :objects)
+                          update-new-shape
+                          update-original-shape)
+
+        rchanges (mapv (fn [shape']
+                         {:type :add-obj
+                          :id (:id shape')
+                          :page-id (:id page)
+                          :parent-id (:parent-id shape')
+                          :obj shape'})
+                       new-shapes)
+
+        uchanges (mapv (fn [shape']
+                         {:type :del-obj
+                          :id (:id shape')
+                          :page-id (:id page)})
+                       new-shapes)]
+
+    [rchanges uchanges]))
+
 (defn- add-shape-to-component
   [shape component page]
-  (let [parent-shape           (cph/get-shape page (:parent-id shape))
-        component-parent-shape (cph/get-shape component (:shape-ref parent-shape))
+  (log/info :msg (str "ADD [C] "
+                      (:name shape)))
+  (let [parent-shape (cph/get-shape page (:parent-id shape))
 
         update-new-shape (fn [new-shape original-shape]
                            new-shape)
@@ -647,39 +726,39 @@
                           update-original-shape)
 
         rchanges (d/concat
-                   (vec (map (fn [shape']
-                          {:type :add-obj
-                           :id (:id shape')
-                           :component-id (:id component)
-                           :parent-id (:parent-id shape')
-                           :obj shape'})
-                        new-shapes))
-                   (vec (map (fn [shape']
-                          {:type :mod-obj
-                           :page-id (:id page)
-                           :id (:id shape')
-                           :operations [{:type :set
-                                         :attr :component-id
-                                         :val (:component-id shape')}
-                                        {:type :set
-                                         :attr :component-file
-                                         :val (:component-file shape')}
-                                        {:type :set
-                                         :attr :component-root?
-                                         :val (:component-root? shape')}
-                                        {:type :set
-                                         :attr :shape-ref
-                                         :val (:shape-ref shape')}
-                                        {:type :set
-                                         :attr :touched
-                                         :val (:touched shape')}]})
-                             updated-shapes)))
+                   (mapv (fn [shape']
+                           {:type :add-obj
+                            :id (:id shape')
+                            :component-id (:id component)
+                            :parent-id (:parent-id shape')
+                            :obj shape'})
+                         new-shapes)
+                   (mapv (fn [shape']
+                           {:type :mod-obj
+                            :page-id (:id page)
+                            :id (:id shape')
+                            :operations [{:type :set
+                                          :attr :component-id
+                                          :val (:component-id shape')}
+                                         {:type :set
+                                          :attr :component-file
+                                          :val (:component-file shape')}
+                                         {:type :set
+                                          :attr :component-root?
+                                          :val (:component-root? shape')}
+                                         {:type :set
+                                          :attr :shape-ref
+                                          :val (:shape-ref shape')}
+                                         {:type :set
+                                          :attr :touched
+                                          :val (:touched shape')}]})
+                         updated-shapes))
 
-        uchanges (map (fn [shape']
-                        {:type :del-obj
-                         :id (:id shape')
-                         :page-id (:id page)})
-                      new-shapes)]
+        uchanges (mapv (fn [shape']
+                         {:type :del-obj
+                          :id (:id shape')
+                          :page-id (:id page)})
+                       new-shapes)]
 
     [rchanges uchanges]))
 
@@ -709,6 +788,26 @@
                      :page-id page-id
                      :shapes (vec parents)}])]
 
+    [rchanges uchanges]))
+
+(defn- move-shape
+  [shape index-before index-after container]
+  (log/info :msg (str "MOVE "
+                      (:name shape)
+                      " "
+                      index-before
+                      " -> "
+                      index-after))
+  (let [rchanges [{:type :mov-objects
+                   :parent-id (:parent-id shape)
+                   :shapes [(:id shape)]
+                   :index index-after
+                   :page-id (:id container)}]
+        uchanges [{:type :mov-objects
+                   :parent-id (:parent-id shape)
+                   :shapes [(:id shape)]
+                   :index index-before
+                   :page-id (:id container)}]]
     [rchanges uchanges]))
 
 (defn- remove-component-and-ref

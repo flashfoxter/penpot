@@ -70,13 +70,18 @@
 ;;                          libraries))]
 ;;     (get-shape deep-component (:shape-ref shape))))
 
-(defn resolve-shape-ref-direct
-  [shape component]
-  (if-let [master-shape (get-shape component (:shape-ref shape))]
-    master-shape
-    (d/seek #(= (:shape-ref %)
-                (:shape-ref shape))
-            (vals (:objects component)))))
+;; (defn resolve-shape-ref-direct
+;;   [shape component]
+;;   (if-let [master-shape (get-shape component (:shape-ref shape))]
+;;     master-shape
+;;     (d/seek #(= (:shape-ref %)
+;;                 (:shape-ref shape))
+;;             (vals (:objects component)))))
+
+(defn is-master-of
+  [shape-master shape-inst]
+  (or (= (:shape-ref shape-inst) (:id shape-master))
+      (= (:shape-ref shape-inst) (:shape-ref shape-master))))
 
 (defn get-component-root
   [component]

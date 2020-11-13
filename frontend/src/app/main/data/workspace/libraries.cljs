@@ -33,7 +33,7 @@
    [potok.core :as ptk]))
 
 ;; Change this to :info :debug or :trace to debug this module
-(log/set-level! :warn)
+(log/set-level! :debug)
 
 (declare sync-file)
 
